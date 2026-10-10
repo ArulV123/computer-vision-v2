@@ -50,13 +50,18 @@
   #chip i{width:8px;height:8px;border-radius:50%;background:#8b949e;flex-shrink:0;}
   #chip.ok i{background:var(--accent);} #chip.err i{background:#e0705a;} #chip.busy i{background:#e0a02f;}
   #chipTxt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  #portBtn{background:transparent;border:1px solid transparent;color:var(--dim);opacity:.28;font-size:18px;line-height:1;padding:5px 9px;border-radius:6px;cursor:pointer;transition:opacity .2s,border-color .2s,color .2s;}
-  #portBtn:hover,#portBtn:focus-visible{opacity:.95;border-color:var(--border);}
-  #portBtn.on{color:var(--accent);opacity:.7;}
+  #portBtn{position:fixed;right:10px;bottom:10px;z-index:50;width:22px;height:22px;background:transparent;border:0;color:var(--dim);opacity:.18;font-size:13px;line-height:1;padding:0;border-radius:50%;cursor:pointer;transition:opacity .2s,color .2s;}
+  #portBtn:hover,#portBtn:focus-visible{opacity:1;}
+  #portBtn.on{color:var(--accent);opacity:.18;}
+  #portBtn.on:hover,#portBtn.on:focus-visible{opacity:1;}
+  .connection-status{display:inline-flex;align-items:center;gap:7px;padding:5px 9px;border:1px solid var(--border);border-radius:6px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim)}
+  .connection-dot{width:7px;height:7px;border-radius:50%;background:#8b949e;display:inline-block;flex-shrink:0}
+  .connection-status.connected{border-color:var(--accent);color:var(--accent)}
+  .connection-status.connected .connection-dot{background:var(--accent)}
 
   /* secret port popover */
-  #portPop{position:absolute;right:16px;top:calc(100% + 8px);width:min(320px,calc(100vw - 32px));background:#12171e;border:1px solid var(--border);border-radius:12px;padding:14px;
-    box-shadow:0 20px 50px -20px rgba(0,0,0,.8);opacity:0;transform:translateY(-6px) scale(.98);transform-origin:top right;pointer-events:none;visibility:hidden;
+  #portPop{position:fixed;right:10px;bottom:40px;top:auto;width:min(320px,calc(100vw - 32px));background:#12171e;border:1px solid var(--border);border-radius:12px;padding:14px;
+    box-shadow:0 20px 50px -20px rgba(0,0,0,.8);opacity:0;transform:translateY(6px) scale(.98);transform-origin:bottom right;pointer-events:none;visibility:hidden;
     transition:opacity .2s ease,transform .25s var(--ease),visibility 0s .25s;}
   #portPop.open{opacity:1;transform:none;pointer-events:auto;visibility:visible;transition:opacity .2s ease,transform .25s var(--ease);}
   #portPop h4{margin:0 0 8px;font-size:13px;}
@@ -197,11 +202,12 @@
         Back
       </a>
       <div class="tb-title">Object classifier<span>finds a grip, you tap to close</span></div>
+      <span class="connection-status disconnected" id="gestureConnectionStatus"><span class="connection-dot"></span><span id="gestureConnectionText">Disconnected</span></span>
     </div>
     <div class="tb-right">
       <input type="text" id="code" placeholder="Device code" inputmode="numeric" autocomplete="off">
       <span id="chip" class="busy"><i></i><span id="chipTxt">Starting…</span></span>
-      <button id="portBtn" title="" aria-label="Port settings">&#8942;</button>
+      <button id="portBtn" title="" aria-label="Port settings">&#9881;</button>
     </div>
 
     <!-- secret port picker -->
@@ -314,7 +320,10 @@
     var href=b.href;
     try{ window.__zippyStop && window.__zippyStop(); }catch(_){}
     document.documentElement.classList.add('leaving');
-    setTimeout(function(){ location.assign(href); },640);
+    setTimeout(function(){
+      var rel=Promise.resolve(window.__zippyReleasePort&&window.__zippyReleasePort()).catch(function(){});
+      Promise.race([rel,new Promise(function(r){setTimeout(r,900);})]).then(function(){ location.assign(href); });
+    },640);
   });
   window.addEventListener('pageshow',function(ev){ if(ev.persisted){ document.documentElement.classList.remove('leaving'); b.__go=false; } });
 })();
@@ -2884,24 +2893,61 @@ function portTag(p){ try { const i = p.getInfo(); return i.usbVendorId != null ?
 function updatePortUI(msg){
   const on = !!serial.port;
   portBtn.classList.toggle("on", on);
+  $("gestureConnectionStatus").classList.toggle("connected", on);
+  $("gestureConnectionStatus").classList.toggle("disconnected", !on);
+  $("gestureConnectionText").textContent = on ? "Connected" : "Disconnected";
   $("portState").textContent = msg || (on ? (store.get("zippyPortLabel") || "COM3") + " · " + portTag(serial.port) + " · connected"
     : (hasSerial ? "Not connected" : "This browser has no Web Serial (use Chrome or Edge)"));
 }
+/* Same port handling as the main page: 115200 baud, DTR/RTS off, same saved-port key,
+   port is read continuously and re-opened on load / replug. */
+const INFO_KEY = "zippySerialPortInfo";
+let portReader = null, portLoop = null;
+async function readLoop(p){
+  while (p.readable && serial.port === p){
+    portReader = p.readable.getReader();
+    try { for (;;){ const r = await portReader.read(); if (r.done) break; } } catch {}
+    finally { try { portReader.releaseLock(); } catch {} portReader = null; }
+  }
+  if (serial.port === p){ try { await p.close(); } catch {} serial.port = null; updatePortUI(); }   // lost without the user asking
+}
 async function openPort(p){
-  try { await p.open({ baudRate: +$("baud").value || 115200 }); }
+  try {
+    await p.open({ baudRate: +$("baud").value || 115200 });
+    try { await p.setSignals({ dataTerminalReady:false, requestToSend:false }); } catch {}
+  }
   catch (e) { if (e.name !== "InvalidStateError") throw e; }   // already open = fine
   serial.port = p;
   try { const i = p.getInfo(); store.set("zippyPort", JSON.stringify({ v:i.usbVendorId, p:i.usbProductId })); } catch {}
+  try { localStorage.setItem(INFO_KEY, JSON.stringify(p.getInfo ? p.getInfo() : {})); } catch {}
   updatePortUI();
+  portLoop = readLoop(p);
+}
+window.__zippyReleasePort = async () => {   // used before leaving so the main page can re-open the same port
+  const p = serial.port; if (!p) return;
+  serial.port = null;
+  try { if (portReader) await portReader.cancel(); } catch {}
+  try { if (portLoop) await portLoop; } catch {}
+  try { await p.close(); } catch {}
+};
+function matchesSaved(p){
+  try {
+    const saved = JSON.parse(localStorage.getItem(INFO_KEY) || "{}");
+    const info = p.getInfo ? p.getInfo() : {};
+    if (!saved.usbVendorId) return true;
+    return saved.usbVendorId === info.usbVendorId && saved.usbProductId === info.usbProductId;
+  } catch { return true; }
 }
 async function autoPort(){
   if (!hasSerial) return updatePortUI();
   try {
     const ports = await navigator.serial.getPorts();           // ports already allowed for this site (the main page's port)
     if (!ports.length) return updatePortUI();
-    let want = null; try { want = JSON.parse(store.get("zippyPort") || "null"); } catch {}
-    const pick = (want && ports.find(x => { const i = x.getInfo(); return i.usbVendorId === want.v && i.usbProductId === want.p; })) || ports[0];
-    await openPort(pick);
+    for (const p of ports){
+      if (serial.port) return;
+      if (!matchesSaved(p)) continue;
+      try { await openPort(p); return; } catch (e) { console.warn(e); updatePortUI("Found a port but couldn't open it: " + (e.message || e)); }
+    }
   } catch (e) { console.warn(e); updatePortUI("Found a port but couldn't open it: " + (e.message || e)); }
 }
 $("portChoose").onclick = async () => {
@@ -2909,8 +2955,9 @@ $("portChoose").onclick = async () => {
   try { await openPort(await navigator.serial.requestPort()); }
   catch (e) { if (e.name !== "NotFoundError") updatePortUI("Couldn't open: " + (e.message || e)); }
 };
-$("portOff").onclick = async () => { try { if (serial.port) await serial.port.close(); } catch {} serial.port = null; updatePortUI(); };
+$("portOff").onclick = async () => { await window.__zippyReleasePort(); updatePortUI(); };
 if (hasSerial) navigator.serial.addEventListener("disconnect", () => { serial.port = null; updatePortUI(); });
+if (hasSerial) navigator.serial.addEventListener("connect", () => { if (!serial.port) autoPort(); });
 portBtn.onclick = e => { e.stopPropagation(); portPop.classList.toggle("open"); };
 document.addEventListener("click", e => { if (!portPop.contains(e.target) && e.target !== portBtn) portPop.classList.remove("open"); });
 updatePortUI(); autoPort();
